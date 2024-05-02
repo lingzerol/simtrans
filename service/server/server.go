@@ -1,58 +1,178 @@
 package server
 
 import (
-	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/lingzerol/simtrans/library/config"
+	"github.com/lingzerol/simtrans/library/encrypt"
+	"github.com/lingzerol/simtrans/library/errno"
 	"github.com/lingzerol/simtrans/library/logger"
+	"github.com/lingzerol/simtrans/library/utils"
+	"github.com/lingzerol/simtrans/model/entity"
+	server_entity "github.com/lingzerol/simtrans/model/entity/server"
 )
 
-func InitServer(configPath string) {
-	serverConfig, err := config.InitServerConfig(configPath)
-	if err != nil {
-		panic("[server] init failed: " + err.Error())
-	}
-	if serverConfig == nil {
-		panic("[server] init failed with unknown error")
-	}
+type ServerConnection struct {
+	ID          uint64
+	DeviceName  string
+	ctx         context.Context
+	cancel      context.CancelFunc
+	conn        net.Conn
+	authMessage chan []byte
+}
 
-	// 监听TCP连接
-	listener, err := net.Listen("tcp", serverConfig.Listen)
-	if err != nil {
-		panic("[server]: listen port failed" + err.Error())
+func NewServerConnection(ctx context.Context, conn net.Conn) *ServerConnection {
+	id, _ := utils.RandomID()
+	nctx, cancel := context.WithCancel(ctx)
+	serverConnection := &ServerConnection{
+		ID:     id,
+		ctx:    nctx,
+		cancel: cancel,
+		conn:   conn,
 	}
-	defer listener.Close()
-	logger.GetLogger().Info("[server] listen " + serverConfig.Listen)
+	go serverConnection.HearBeat()
 
+}
+
+func (s *ServerConnection) Listen() {
+	if s == nil {
+		logger.GetLogger().Warn("empty connection")
+		return
+	}
+	go func() {
+		for {
+			select {
+			case <-s.ctx.Done():
+				logger.GetLogger().Info(fmt.Sprintf("connection %s done", s.ID))
+				s.conn.Close()
+				return
+			}
+		}
+	}()
+
+	buf := make([]byte, entity.MaxBufferSize)
 	for {
-		conn, err := listener.Accept()
-		if err != nil || conn == nil {
-			logger.GetLogger().Warn("[server] connect client "+conn.RemoteAddr().Network()+" failed:", err)
+		_, err := s.conn.Read(buf)
+		if err != nil {
+			logger.GetLogger().Warn(fmt.Sprintf("read message error: ", err))
+			s.conn.Close()
+			s.cancel()
+			return
+		}
+		secretKey := config.GetSecretKey(s.DeviceName)
+		if secretKey == "" {
+			s.conn.Close()
+			s.cancel()
+			return
+		}
+
+		content, err := encrypt.AesDecrypt(string(buf), secretKey)
+		if err == nil {
+			logger.GetLogger().Warn(fmt.Sprintf("message decrypt error: ", err))
 			continue
 		}
-		logger.GetLogger().Info("[server] client establish connection success:", conn.RemoteAddr().Network())
-
-		go handleConnection(conn)
+		var command server_entity.ServerCommand
+		err = json.Unmarshal([]byte(content), &command)
+		if err != nil {
+			logger.GetLogger().Warn(fmt.Sprintf("message parse error: ", err))
+			continue
+		}
+		s.Command(&command)
 	}
 }
 
-func handleConnection(conn net.Conn) {
-	defer conn.Close()
-
-	// 读取客户端发送的消息
-	scanner := bufio.NewScanner(conn)
-	for scanner.Scan() {
-		// 打印收到的消息
-		fmt.Println("收到客户端消息:", scanner.Text())
-
-		// 回复客户端
-		response := "收到您的消息: " + scanner.Text()
-		conn.Write([]byte(response + "\n"))
+func (s *ServerConnection) Command(command *server_entity.ServerCommand) error {
+	switch command.Command.Type {
+	case server_entity.CopyCommand:
+		s.Copy(command)
+	case server_entity.PutCommand:
+		s.Put(command)
+	case server_entity.PasteCommand:
+		s.Paste(command)
+	case server_entity.DeleteCommand:
+		s.Delete(command)
 	}
+}
 
-	if err := scanner.Err(); err != nil {
-		fmt.Println("读取客户端消息时发生错误:", err)
+func (s *ServerConnection) Copy(command *server_entity.ServerCommand) error {
+
+}
+
+func (s *ServerConnection) Put(command *server_entity.ServerCommand) error {
+
+}
+
+func (s *ServerConnection) Paste(command *server_entity.ServerCommand) error {
+
+}
+
+func (s *ServerConnection) DefaultPaste() error {
+
+}
+
+func (s *ServerConnection) Delete(command *server_entity.ServerCommand) error {
+
+}
+
+func (s *ServerConnection) CheckAuth() (bool, error) {
+	if s == nil {
+		return false, errno.WrapCodeErrorf(errno.AuthFailed, fmt.Sprintf("connection is nil"))
+	}
+	params := entity.AuthParams{
+		CommonField: entity.CommonField{
+			Timestamp: time.Now().Unix(),
+		},
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		return false, errno.NewCodeError(errno.ParamsError, "json marshal error", err)
+	}
+	_, err = s.conn.Write([]byte(data))
+	if err != nil {
+		return false, errno.NewCodeError(errno.ConnSendFailed, "send check auth failed", err)
+	}
+	var message []byte
+	select {
+	case <-time.After(time.Duration(entity.AuthTimeOut)):
+	case message = <-s.authMessage:
+	}
+	var authMessage entity.AuthResonse
+	err = json.Unmarshal(message, &authMessage)
+	if err != nil {
+		return false, errno.NewCodeError(errno.ConnSendFailed, "parse check auth message failed", err)
+	}
+	s.DeviceName = authMessage.DeviceName
+	secretKey := config.GetSecretKey(authMessage.DeviceName)
+	if secretKey == "" {
+		return false, nil
+	}
+	decrypt_message, err := encrypt.AesDecrypt(authMessage.Message, secretKey)
+	if err != nil {
+		return false, err
+	}
+	if decrypt_message == entity.DefaultAuthMessage {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s *ServerConnection) HearBeat() {
+	for {
+		ok, err := s.CheckAuth()
+		if err != nil {
+			logger.GetLogger().Warn(fmt.Sprintf("connecion %d hearbeat failed, error: ", s.ID), err)
+			s.cancel()
+			return
+		}
+		if !ok {
+			logger.GetLogger().Warn(fmt.Sprintf("connecion %d hearbeat failed", s.ID), err)
+			s.cancel()
+			return
+		}
+		time.Sleep(time.Duration(entity.HearBeatTimeSpan))
 	}
 }

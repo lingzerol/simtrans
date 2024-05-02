@@ -7,15 +7,31 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+type DeviceConfig struct {
+	Name      string
+	SecretKey string
+}
+
+type MysqlConfig  struct {
+	Host string
+	Port string
+	UserName string
+	Password string
+	DBName string
+}
+
 type ServerConfig struct {
-	Listen         string
-	MaxClients     uint64
-	MaxLen         uint64
-	Timeout        time.Duration
-	DataTimeout    time.Duration
-	TTL            time.Duration
-	AliveSpan      time.Duration
-	TrustedDevices []string
+	Listen          string
+	MaxClients      uint64
+	MaxLen          uint64
+	Timeout         time.Duration
+	DataTimeout     time.Duration
+	TTL             time.Duration
+	AliveSpan       time.Duration
+	TrustedDevices  map[string]DeviceConfig
+	TrustLogin      bool
+	CommonSecretKey string
+	DBConfig MysqlConfig
 }
 
 var (
@@ -35,4 +51,17 @@ func InitServerConfig(configPath string) (*ServerConfig, error) {
 
 func GetServerConfig() *ServerConfig {
 	return &serverConfig
+}
+
+func GetSecretKey(deviceName string) string {
+	serverConfig := GetServerConfig()
+	secretKey := serverConfig.CommonSecretKey
+	if serverConfig.TrustLogin {
+		deviceConfig, ok := serverConfig.TrustedDevices[deviceName]
+		if !ok {
+			return ""
+		}
+		secretKey = deviceConfig.SecretKey
+	}
+	return secretKey
 }
