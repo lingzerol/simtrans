@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/lingzerol/simtrans/library/utils"
 )
 
 type DeviceConfig struct {
@@ -12,15 +13,17 @@ type DeviceConfig struct {
 	SecretKey string
 }
 
-type MysqlConfig  struct {
-	Host string
-	Port string
+type DatabaseConfig struct {
+	DBType   string
+	Host     string
+	Port     string
 	UserName string
-	Password string
-	DBName string
+	PassWord string
+	DBName   string
 }
 
 type ServerConfig struct {
+	ServiceID       uint64
 	Listen          string
 	MaxClients      uint64
 	MaxLen          uint64
@@ -31,7 +34,7 @@ type ServerConfig struct {
 	TrustedDevices  map[string]DeviceConfig
 	TrustLogin      bool
 	CommonSecretKey string
-	DBConfig MysqlConfig
+	DBConfig        DatabaseConfig
 }
 
 var (
@@ -45,6 +48,9 @@ func InitServerConfig(configPath string) (*ServerConfig, error) {
 	}
 	if _, err = toml.Decode(string(tomlData), &serverConfig); err != nil {
 		return nil, err
+	}
+	if serverConfig.ServiceID <= 0 {
+		serverConfig.ServiceID, _ = utils.RandomID()
 	}
 	return &serverConfig, nil
 }
