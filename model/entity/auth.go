@@ -7,11 +7,11 @@ const (
 )
 
 type AuthParams struct {
-	CommonField
+	Command
 }
 
 type AuthResonse struct {
-	CommonField
+	Command
 	DeviceName string `json:"device_name" form:"device_name"`
 	Message    string `json:"message" form:"message"`
 }

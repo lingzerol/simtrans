@@ -1,6 +1,16 @@
 package entity
 
+const (
+	CommandExpireTime = 600
+)
+
 type Command struct {
-	Type    string `json:"type" form:"type" binding:"required"`
-	Content string `json:"content" from:"content" binding:"required"`
+	ID        uint64 `json:"id" form:"id" binding:"required"`
+	Type      string `json:"type" form:"type" binding:"required"`
+	Content   string `json:"content" from:"content" binding:"omitempty"`
+	TimeStamp int64  `json:"timestamp" form:"timestamp" binding:"required"`
+}
+
+type CommandParams struct {
+	Command
 }

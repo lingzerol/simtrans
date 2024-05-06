@@ -7,32 +7,37 @@ import (
 	"net"
 	"time"
 
-	"github.com/lingzerol/simtrans/library/config"
 	"github.com/lingzerol/simtrans/library/encrypt"
 	"github.com/lingzerol/simtrans/library/errno"
-	"github.com/lingzerol/simtrans/library/logger"
 	"github.com/lingzerol/simtrans/library/utils"
+	"github.com/lingzerol/simtrans/model/config"
+	data "github.com/lingzerol/simtrans/model/data/server"
 	"github.com/lingzerol/simtrans/model/entity"
 	server_entity "github.com/lingzerol/simtrans/model/entity/server"
+	"github.com/lingzerol/simtrans/model/logger"
+	"github.com/united-manufacturing-hub/expiremap/pkg/expiremap"
 )
 
 type ServerConnection struct {
-	ID          uint64
-	DeviceName  string
-	ctx         context.Context
-	cancel      context.CancelFunc
-	conn        net.Conn
-	authMessage chan []byte
+	ID                  uint64
+	DeviceName          string
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	conn                net.Conn
+	authMessage         chan []byte
+	processedCommandIds *expiremap.ExpireMap[uint64, bool]
 }
 
 func NewServerConnection(ctx context.Context, conn net.Conn) *ServerConnection {
+	var exMap = expiremap.NewEx[uint64, bool](time.Minute, 2*entity.CommandExpireTime)
 	id, _ := utils.RandomID()
 	nctx, cancel := context.WithCancel(ctx)
 	serverConnection := &ServerConnection{
-		ID:     id,
-		ctx:    nctx,
-		cancel: cancel,
-		conn:   conn,
+		ID:                  id,
+		ctx:                 nctx,
+		cancel:              cancel,
+		conn:                conn,
+		processedCommandIds: exMap,
 	}
 	go serverConnection.HearBeat()
 
@@ -70,13 +75,8 @@ func (s *ServerConnection) Listen() {
 			return
 		}
 
-		content, err := encrypt.AesDecrypt(string(buf), secretKey)
-		if err == nil {
-			logger.GetLogger().Warn(fmt.Sprintf("message decrypt error: ", err))
-			continue
-		}
 		var command server_entity.ServerCommand
-		err = json.Unmarshal([]byte(content), &command)
+		err = json.Unmarshal(buf, &command)
 		if err != nil {
 			logger.GetLogger().Warn(fmt.Sprintf("message parse error: ", err))
 			continue
@@ -86,6 +86,14 @@ func (s *ServerConnection) Listen() {
 }
 
 func (s *ServerConnection) Command(command *server_entity.ServerCommand) error {
+	if command.TimeStamp+entity.CommandExpireTime <= time.Now().Unix() {
+		return errno.WrapCodeErrorf(errno.RequrestTimeOut, "request is timeout")
+	}
+	_, ok := s.processedCommandIds.Load(command.ID)
+	if ok {
+		return errno.NewDefaultCodeError(errno.RepeatRequest)
+	}
+	s.processedCommandIds.Set(command.ID, true)
 	switch command.Command.Type {
 	case server_entity.CopyCommand:
 		s.Copy(command)
@@ -95,6 +103,8 @@ func (s *ServerConnection) Command(command *server_entity.ServerCommand) error {
 		s.Paste(command)
 	case server_entity.DeleteCommand:
 		s.Delete(command)
+	case server_entity.RefreshCacheCommand:
+		s.RefreshCache(command)
 	}
 }
 
@@ -118,13 +128,30 @@ func (s *ServerConnection) Delete(command *server_entity.ServerCommand) error {
 
 }
 
+func (s *ServerConnection) RefreshCache(command *server_entity.ServerCommand) error {
+	var params server_entity.CacheRefreshParams
+	err := json.Unmarshal([]byte(command.Content), &params)
+	if err != nil {
+		return errno.WrapCodeError(errno.ParamsError, err)
+	}
+	err = data.NewCacheSrv().RefreshCache(&params)
+	command.Type = server_entity.SendRefreshCacheCommand
+	GetServer().SendOtherConnectionsCommand(s.ID, command)
+	return err
+}
+
+func (s *ServerConnection) SendRefreshCache(command *server_entity.ServerCommand) error {
+
+}
+
 func (s *ServerConnection) CheckAuth() (bool, error) {
 	if s == nil {
 		return false, errno.WrapCodeErrorf(errno.AuthFailed, fmt.Sprintf("connection is nil"))
 	}
 	params := entity.AuthParams{
-		CommonField: entity.CommonField{
-			Timestamp: time.Now().Unix(),
+		Command: entity.Command{
+			Type:      server_entity.AuthCommand,
+			TimeStamp: time.Now().Unix(),
 		},
 	}
 	data, err := json.Marshal(params)

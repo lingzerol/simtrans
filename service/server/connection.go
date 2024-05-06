@@ -5,6 +5,7 @@ import (
 )
 
 type Connection interface {
+	GetConnectionID() uint64
 	Command(*server_entity.ServerCommand) error
 	Copy(*server_entity.ServerCommand) error
 	Put(*server_entity.ServerCommand) error

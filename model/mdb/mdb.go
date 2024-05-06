@@ -3,7 +3,7 @@ package mdb
 import (
 	"fmt"
 
-	"github.com/lingzerol/simtrans/library/config"
+	"github.com/lingzerol/simtrans/model/config"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
